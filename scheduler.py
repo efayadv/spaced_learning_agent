@@ -34,9 +34,12 @@ scheduler = Scheduler(
 
 
 def schedule_next_review(card: Card, rating: Rating):
-    updated_card, review_log = scheduler.review_card(card, rating)
-    return updated_card, review_log
+    return scheduler.review_card(card, rating)
 
+card = Card()
 
+card, review_log = schedule_next_review(card, Rating.Good)
+
+print("Next review:", card.due)
 
 
