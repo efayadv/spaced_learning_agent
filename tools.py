@@ -144,6 +144,124 @@ def get_due_items():
     finally:
         connection.close()
 
+def start_study_session(topic_name: str):
+    topic_name = topic_name.strip()
+
+    if not topic_name:
+        raise ValueError("Topic cannot be empty")
+
+    connection = get_connection()
+
+    try:
+        with connection:
+            active = connection.execute(
+                """
+                SELECT id
+                FROM study_sessions
+                WHERE ended_at IS NULL
+                """
+            ).fetchone()
+
+            if active is not None:
+                raise ValueError(
+                    f"Session #{active['id']} is already active. "
+                    "Finish it before starting another."
+                )
+
+            connection.execute(
+                "INSERT OR IGNORE INTO topics (name) VALUES (?)", 
+                (topic_name,),
+            )
+
+            topic = connection.execute(
+                "SELECT id FROM topics WHERE name = ?",
+                (topic_name,),
+            ).fetchone()
+
+            started_at = datetime.now(timezone.utc).isoformat()
+
+            cursor = connection.execute(
+                """
+                INSERT INTO study_sessions (topic_id, started_at)
+                VALUES (?, ?)
+                """,
+                (topic["id"], started_at),
+            )
+
+            return {
+                "session_id": cursor.lastrowid,
+                "topic": topic_name,
+                "started_at": started_at,
+            }
+    finally:
+        connection.close()
+
+
+
+def get_active_study_session():
+    connection = get_connection()
+
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                study_sessions.id,
+                topics.name AS topic,
+                study_sessions.started_at
+            FROM study_sessions
+            JOIN topics ON topics.id = study_sessions.topic_id
+            WHERE study_sessions.ended_at IS NULL
+            """
+        ).fetchone()
+
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+def finish_study_session(notes: str):
+    notes = notes.strip()
+
+    if not notes:
+        raise ValueError(
+            "Describe what you covered so the coach can assess it later."
+        )
+
+    connection = get_connection()
+
+    try: 
+        with connection:
+            session = connection.execute(
+                """
+                SELECT id, started_at
+                FROM study_sessions
+                WHERE ended_at is NULL
+                """
+            ).fetchone()
+
+            if session is None:
+                raise ValueError("There is no active study session.")
+
+            ended_at = datetime.now(timezone.utc)
+            started_at = datetime.fromisoformat(session["started_at"])
+
+            connection.execute(
+                """
+                UPDATE study_sessions
+                SET ended_at = ?, notes = ?
+                WHERE id = ?
+                """,
+                (ended_at.isoformat(), notes, session["id"]),
+            )
+            return {
+                "session_id": session["id"],
+                "elapsed_minutes": (
+                    ended_at - started_at
+                ).total_seconds() / 60,
+                "assessment_status": "pending",
+            }
+
+    finally:
+        connection.close()
 
 
 

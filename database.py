@@ -43,6 +43,20 @@ def initialize_database():
 
                 CREATE INDEX IF NOT EXISTS idx_review_items_due
                 ON review_items(next_due_at);
+
+                CREATE TABLE IF NOT EXISTS study_sessions (
+                    id INTEGER PRIMARY KEY,
+                    topic_id INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    notes TEXT,
+                    assessment_status TEXT NOT NULL DEFAULT 'pending',
+                    FOREIGN KEY (topic_id) REFERENCES topics(id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS one_active_study_session
+                ON study_sessions ((1))
+                WHERE ended_at IS NULL;
             """)
     finally:
         connection.close()
