@@ -263,6 +263,38 @@ def finish_study_session(notes: str):
     finally:
         connection.close()
 
+def get_study_session(session_id: id):
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                study_sessions.id,
+                topics.name AS topic,
+                study_sessions.started_at,
+                study_sessions.ended_at,
+                study_sessions.notes
+            FROM study_sessions
+            JOIN topics ON topics.id = study_sessions.topic_id
+            WHERE study_sessions.id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError("Study session not found")
+
+        if row["ended_at"] is None:
+            raise ValueError("Finish the study session first")
+
+        return dict(row)
+    
+    finally:
+        connection.close()
+
+
+
+
 
 
 

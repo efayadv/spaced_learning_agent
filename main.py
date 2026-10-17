@@ -8,6 +8,7 @@ from tools import (
     get_active_study_session,
     finish_study_session,
 )
+from agent import run_coach
 
 def show_due_items(items):
     for item in items:
@@ -81,6 +82,8 @@ def main():
         print("4. Start studying")
         print("5. Finish studying")
         print("6. Exit")
+        print("7. Discuss a completed session with the AI coach")
+
 
         choice = input("Choose an option: ").strip()
 
@@ -153,8 +156,12 @@ def main():
                     )
                 break
 
+            elif choice == "7":
+                session_id = int(input("Completed study session ID: "))
+                run_coach(session_id)
+
             else:
-                print("Please choose an option from 1 to 6.")
+                print("Please choose an option from 1 to 7.")
 
         except ValueError as error:
             print(error)
