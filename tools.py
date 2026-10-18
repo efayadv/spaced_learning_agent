@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from scheduler import schedule_next_review
 from database import get_connection
 from fsrs import Card, Rating
+
 
 
 def add_review_item(topic_name: str, learning_objective: str):
@@ -47,17 +48,31 @@ def add_review_item(topic_name: str, learning_objective: str):
     finally:
         connection.close()
 
-def complete_review(item_id: int, answer: str, rating_value: int ):
+def complete_review(
+        item_id: int, 
+        answer: str, 
+        rating_value: int,
+        question: str | None = None,
+        feedback: str | None = None,
+    ):
     if rating_value not in (1, 2, 3, 4):
         raise ValueError("Rating must be between 1 and 4")
 
-    if not answer.strip():
-        raise ValueError("Answer cannot be empty")
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Answer cannot be empty.")
+
+    if question is None and (not isinstance(question, str) or not question.strip()):
+        raise ValueError("Question cannot be empty")
+
+    if feedback is None and (not isinstance(feedback, str) or not feedback.strip()):
+        raise ValueError("Feedback cannot be empty")
 
     connection = get_connection()
 
     try:
         with connection:
+            connection.execute("BEGIN IMMEDIATE")
+
             item = connection.execute(
                 """
                 SELECT learning_objective, fsrs_card_json
@@ -103,15 +118,16 @@ def complete_review(item_id: int, answer: str, rating_value: int ):
                 """,
                 (
                     item_id,
-                    item["learning_objective"],
+                    question.strip() if question else item["learning_objective"],
                     answer.strip(),
-                    f"Self-assessed: {rating.name}",
+                    feedback.strip() if feedback else f"Self-assessed: {rating.name}",
                     review_log.to_json(),
                     review_log.review_datetime.isoformat(),
                 ),
             )
 
             return {
+                "status": "saved",
                 "item_id": item_id,
                 "rating": rating.name,
                 "next_due_at": updated_card.due.isoformat(),
@@ -291,6 +307,135 @@ def get_study_session(session_id: id):
     
     finally:
         connection.close()
+
+def get_session_review_items(session_id: int):
+    connection = get_connection()
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                r.id,
+                r.learning_objective,
+                r.next_due_at
+            FROM review_items AS r
+            JOIN session_review_items AS link
+                ON link.review_item_id = r.id
+            WHERE link.session_id = ?
+            ORDER BY r.id
+            """,
+            (session_id,),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    finally:
+        connection.close()
+
+def save_session_review_items(session_id: int, objectives: list[str]):
+    if not isinstance(objectives, list) or not 1 <= len(objectives) <= 5:
+        raise ValueError("Provide between 1 and 5 objectives")
+
+    if any(
+        not isinstance(objective, str)
+        or not objective.strip()
+        or len(objective) > 500
+        for objective in objectives
+    ):
+        raise ValueError("Objectives must be non empty and under 500 characters.")
+
+    objectives = [objective.strip() for objective in objectives]
+
+    if len({objective.casefold() for objective in objectives}) != len(objectives):
+        raise ValueError("Remove duplicate objectives")
+
+    connection = get_connection()
+
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            session = connection.execute(
+                """
+                SELECT topic_id, ended_at
+                FROM study_sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+
+            if session is None or session["ended_at"] is None:
+                raise ValueError("A completed study session is required.")
+
+            existing = connection.execute(
+                """
+                SELECT r.id, r.learning_objective, r.next_due_at
+                FROM review_items AS r
+                JOIN session_review_items AS link
+                    ON link.review_item_id = r.id
+                WHERE link.session_id = ?
+                ORDER BY r.id
+                """,
+                (session_id,),
+            ).fetchall()
+
+            if existing:
+                return {
+                    "status": "already_saved",
+                    "items": [dict(row) for row in existing],
+                }
+
+            first_due = datetime.now(timezone.utc) + timedelta(days=1)
+            saved = []
+
+            for objective in objectives:
+                card = Card()
+                card.due = first_due
+
+                cursor = connection.execute(
+                    """
+                    INSERT INTO review_items (
+                        topic_id,
+                        learning_objective,
+                        fsrs_card_json,
+                        next_due_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        session["topic_id"],
+                        objective,
+                        card.to_json(),
+                        card.due.isoformat(),
+                    ),
+                )
+
+                item_id = cursor.lastrowid
+
+                connection.execute(
+                    """
+                    INSERT INTO session_review_items (
+                        session_id,
+                        review_item_id
+                    ) VALUES (?, ?)
+                    """,
+                    (
+                        session_id,
+                        item_id
+                    ),
+                )
+
+                saved.append({
+                    "id": item_id,
+                    "learning_objective": objective,
+                    "next_due_at": card.due.isoformat(),
+                })
+
+                return {"status": "saved", "items": saved}
+    finally:
+        connection.close()
+    
+
 
 
 

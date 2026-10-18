@@ -57,6 +57,14 @@ def initialize_database():
                 CREATE UNIQUE INDEX IF NOT EXISTS one_active_study_session
                 ON study_sessions ((1))
                 WHERE ended_at IS NULL;
+
+                CREATE TABLE IF NOT EXISTS session_review_items (
+                    session_id INTEGER NOT NULL,
+                    review_item_id INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, review_item_id),
+                    FOREIGN KEY (session_id) REFERENCES study_sessions(id),
+                    FOREIGN KEY (review_item_id) REFERENCES review_items(id)
+                );
             """)
     finally:
         connection.close()
