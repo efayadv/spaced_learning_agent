@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from datetime import datetime
+from scheduler import REVIEW_TIMEZONE
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 
@@ -11,6 +12,8 @@ from tools import (
     get_session_review_items,
     save_session_review_items,
     complete_review,
+    get_due_items,
+    get_item_history,
     )
 
 
@@ -32,7 +35,7 @@ If items already exist:
 - Use their IDs and objectives. Do not create another batch.
 
 After items are saved:
-- Report the returned initial review time as UTC.
+- Report the returned initial review time in America/Chicago using 12-hour time and the timezone abbreviation.
 - Offer an optional short assessment.
 - If declined, leave the initial review dates unchanged.
 - If accepted, assess one saved item at a time.
@@ -66,6 +69,40 @@ Current limitations:
 - Full chat history is not persisted, but saved attempts are.
 - You cannot send reminders or execute code.
 - Do not invent review dates; use dates returned by tools.
+"""
+
+REVIEW_INSTRUCTIONS = """
+You are conducting a spaced repetition review of due learning items.
+
+Use the provided items and their histories to conduct the session.
+Do not create new review items during this workflow.
+
+For each item:
+1. Ask one question testing its learning objective.
+2. Keep difficulty comparable to previous reviews.
+3. Wait for the user's answer before revealing explanations.
+4. If the answer is ambiguous, ask a neutral clarification.
+5. Give concise feedback.
+6. Call record_review with the actual question, answer, feedback,
+   item ID, and suggested rating.
+
+Ratings:
+1 = Again: failed recall or needed the answer revealed.
+2 = Hard: correct recall with serious difficulty.
+3 = Good: correct recall with normal effort.
+4 = Easy: effortless correct recall.
+
+The terminal tool handler collects the user's confirmed rating.
+Use the saved rating and next due date returned by the tool.
+Report returned dates in America/Chicago using 12-hour time and the timezone abbreviation.
+
+Do not reveal previous answers before the user attempts the question.
+Do not count repeating your explanation as independent recall.
+Do not record the same item twice in this conversation.
+If a review is skipped, leave its schedule unchanged.
+After all items are handled, summarize and tell the user they can exit.
+
+You cannot send reminders or execute code.
 """
 
 
@@ -127,10 +164,32 @@ TOOL_DEFINITIONS = [
     }
 ]
 
-
 def run_coach(session_id: int):
     session = get_study_session(session_id)
+    items = get_session_review_items(session_id)
 
+    for item in items:
+        item["history"] = get_item_history(item["id"])
+
+    context = {
+        "mode": "session_assessment",
+        "study_session": session,
+        "saved_review_items": items,
+    }
+
+    run_conversation(
+        context=context,
+        instructions=COACH_INSTRUCTIONS,
+        allowed_item_ids={item["id"] for item in items},
+        session_id=session_id,
+    )
+
+def run_conversation(
+    context: dict,
+    instructions: str,
+    allowed_item_ids: set[int],
+    session_id: int | None = None,
+):
     load_dotenv(Path(__file__).resolve().parent / ".env")
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -138,46 +197,57 @@ def run_coach(session_id: int):
 
     model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-    context = {
-        "study_session": session,
-        "saved_review_items": get_session_review_items(session_id),
-    }
+    # Session preparation can create items.
+    # Due reviews can only record reviews.
+    enabled_tools = [
+        tool
+        for tool in TOOL_DEFINITIONS
+        if tool["name"] == "record_review"
+        or (
+            session_id is not None
+            and tool["name"] == "save_review_items"
+        )
+    ]
+
+    instructions += "\nReview window: every day, 12:00 PM–10:00 PM America/Chicago. Convert UTC tool dates to this timezone when reporting them.\n"
 
     messages = [
         {
             "role": "user",
             "content": (
-                "Help me prepare reviews for this study session:\n"
+                "Use this study context to begin:\n"
                 + json.dumps(context, ensure_ascii=False)
             ),
         }
     ]
 
-    print("\nCoach conversation. Type 'exit' to return to the menu.")
-    print("Approved items persist; the chat and assessment do not yet.")
-
-    tool_rounds = 0
+    # Copy the set so changes stay local to this conversation.
+    allowed_item_ids = set(allowed_item_ids)
     recorded_items = {}
+    tool_rounds = 0
+
+    print("\nCoach conversation. Type 'exit' to return to the menu.")
+    print("Saved items and confirmed reviews persist; full chat does not.")
 
     with OpenAI(timeout=60.0, max_retries=1) as client:
         while True:
             try:
                 response = client.responses.create(
                     model=model,
-                    instructions=COACH_INSTRUCTIONS,
+                    instructions=instructions,
                     input=messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=enabled_tools,
                     parallel_tool_calls=False,
                     max_output_tokens=2000,
                     store=False,
                 )
             except OpenAIError as error:
                 print(f"\nOpenAI request failed: {error}")
-                print("Any previously saved items remain in the database.")
+                print("Previously saved changes remain in the database.")
                 return
 
             if response.status != "completed":
-                print("The response did not finish. Reopen the coach to retry.")
+                print("The response did not finish. Please reopen the coach.")
                 return
 
             messages.extend(response.output)
@@ -195,11 +265,16 @@ def run_coach(session_id: int):
                 tool_rounds += 1
 
                 if tool_rounds > 5:
-                    print("Tool-call limit reached. Reopen the coach to retry.")
+                    print("Tool-call limit reached. Please reopen the coach.")
                     return
 
                 for call in calls:
-                    result = execute_tool(call, session_id, recorded_items)
+                    result = execute_tool(
+                        call=call,
+                        session_id=session_id,
+                        allowed_item_ids=allowed_item_ids,
+                        recorded_items=recorded_items,
+                    )
 
                     messages.append({
                         "type": "function_call_output",
@@ -207,8 +282,7 @@ def run_coach(session_id: int):
                         "output": json.dumps(result),
                     })
 
-                # Let the model read the tool result before asking
-                # for the next conversational message.
+                # Send the tool results back to the model.
                 continue
 
             tool_rounds = 0
@@ -230,8 +304,32 @@ def run_coach(session_id: int):
                 "content": user_message,
             })
 
+def run_due_reviews():
+    due_items = get_due_items()
 
-def handle_record_review(arguments, session_id, recorded_items):
+    if not due_items:
+        print("No reviews are due")
+        return
+
+    for item in due_items:
+        item["history"] = get_item_history(item["id"])
+
+    allowed_item_ids = {item["id"] for item in due_items}
+
+    context = {
+        "mode": "due_reviews",
+        "items": due_items,
+    }
+
+    run_conversation(
+        context=context,
+        instructions=REVIEW_INSTRUCTIONS,
+        allowed_item_ids=allowed_item_ids,
+        session_id=None,
+    )
+
+
+def handle_record_review(arguments, allowed_item_ids, recorded_items):
     required = {
         "item_id",
         "question",
@@ -258,14 +356,8 @@ def handle_record_review(arguments, session_id, recorded_items):
             raise ValueError(f"{field} cannot be empty.")
 
     # The model may only review items linked to the open session.
-    items = get_session_review_items(session_id)
-    selected = next(
-        (item for item in items if item["id"] == item_id),
-        None,
-    )
-
-    if selected is None:
-        raise ValueError("This item does not belong to the open session.")
+    if item_id not in allowed_item_ids:
+        raise ValueError("This item is not part of the current review session.")
 
     # Avoid grading the same item twice in this coach conversation.
     if item_id in recorded_items:
@@ -274,7 +366,7 @@ def handle_record_review(arguments, session_id, recorded_items):
             "status": "already_recorded",
         }
 
-    print(f"\nReview item #{item_id}: {selected['learning_objective']}")
+    print(f"\nReview item #{item_id}")
     print(f"\nQuestion: {arguments['question']}")
     print(f"Your answer: {arguments['answer']}")
     print(f"Feedback: {arguments['feedback']}")
@@ -312,39 +404,42 @@ def handle_record_review(arguments, session_id, recorded_items):
 
     recorded_items[item_id] = result
 
-    due = datetime.fromisoformat(result["next_due_at"]).astimezone()
+    due = datetime.fromisoformat(result["next_due_at"]).astimezone(REVIEW_TIMEZONE)
 
     print(f"\nReview saved as {result['rating']}.")
     print(f"Next review: {due.strftime('%b %d, %Y at %I:%M %p %Z')}")
 
     return result
 
-def execute_tool(call, session_id: int, recorded_items: dict):
-    if call.name == "record_review":
-        try:
-            arguments = json.loads(call.arguments)
-            return handle_record_review(
-                arguments,
-                session_id,
-                recorded_items,
-            )
-        except (ValueError, TypeError) as error:
-            return {"status": "error", "message": str(error)}
-
-    if call.name != "save_review_items":
-        return {"status": "error", "message": "Unknown tool."}
-    
-    if call.name != "save_review_items":
-        return {"status": "error", "message": "Unknown tool."}
-
+def execute_tool(
+    call,
+    session_id: int | None,
+    allowed_item_ids: set[int],
+    recorded_items: dict,
+):
     try:
         arguments = json.loads(call.arguments)
+
+        if call.name == "record_review":
+            return handle_record_review(
+                arguments,
+                allowed_item_ids,
+                recorded_items,
+            )
+
+        if call.name != "save_review_items":
+            raise ValueError("Unknown tool.")
+
+        if session_id is None:
+            raise ValueError(
+                "Creating items is not allowed during due reviews."
+            )
 
         if (
             not isinstance(arguments, dict)
             or set(arguments) != {"objectives"}
         ):
-            raise ValueError("Invalid Tool Arguments")
+            raise ValueError("Invalid tool arguments.")
 
         objectives = arguments["objectives"]
 
@@ -358,12 +453,17 @@ def execute_tool(call, session_id: int, recorded_items: dict):
                 for value in objectives
             )
         ):
-            raise ValueError("Invalid learning objectives")
+            raise ValueError("Invalid learning objectives.")
 
         existing = get_session_review_items(session_id)
 
         if existing:
-            return {"status": "already_saved", "items": existing}
+            allowed_item_ids.update(item["id"] for item in existing)
+
+            return {
+                "status": "already_saved",
+                "items": existing,
+            }
 
         print("\nThe coach wants to save these review items:")
 
@@ -379,6 +479,12 @@ def execute_tool(call, session_id: int, recorded_items: dict):
             }
 
         result = save_session_review_items(session_id, objectives)
+
+        # Newly saved items can now be assessed in this conversation.
+        allowed_item_ids.update(
+            item["id"] for item in result["items"]
+        )
+
         print(f"\nDatabase result: {result['status']}")
 
         return result

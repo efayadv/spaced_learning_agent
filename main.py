@@ -1,14 +1,16 @@
 from database import initialize_database
 from datetime import datetime
+from scheduler import REVIEW_TIMEZONE
 from tools import (
     add_review_item,
+    align_existing_review_times,
     get_due_items,
     complete_review,
     start_study_session,
     get_active_study_session,
     finish_study_session,
 )
-from agent import run_coach
+from agent import run_coach, run_due_reviews
 
 def show_due_items(items):
     for item in items:
@@ -57,7 +59,7 @@ def review_item():
         print(f"Could not save review: {error}")
         return
 
-    due = datetime.fromisoformat(result["next_due_at"]).astimezone()
+    due = datetime.fromisoformat(result["next_due_at"]).astimezone(REVIEW_TIMEZONE)
 
     print(f"\nReview saved! Rating: {result['rating']}")
     print(f"Next review: {due.strftime('%b %d, %Y at %I:%M %p %Z')}")
@@ -65,8 +67,10 @@ def review_item():
 
 def main():
     initialize_database()
+    align_existing_review_times()
 
     while True:
+        print("--------------------------------")
         print("\nInterview Coach")
 
         active = get_active_study_session()
@@ -78,7 +82,7 @@ def main():
 
         print("1. Add a learning item")
         print("2. Show due items")
-        print("3. Complete a review")
+        print("3. Review due items with AI coach")
         print("4. Start studying")
         print("5. Finish studying")
         print("6. Exit")
@@ -106,7 +110,7 @@ def main():
                     print("No reviews are due.")
 
             elif choice == "3":
-                review_item()
+                run_due_reviews()
 
             elif choice == "4":
                 topic = input("What are you studying? ")

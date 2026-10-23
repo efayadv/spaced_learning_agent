@@ -1,5 +1,20 @@
 from fsrs import Scheduler, Card, Rating, ReviewLog
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+REVIEW_TIMEZONE = ZoneInfo("America/Chicago")
+
+def fit_review_window(due: datetime) -> datetime:
+    """Move out-of-window times forward to the next local noon."""
+    if due.tzinfo is None:
+        raise ValueError("Review dates must include a timezone.")
+    local = due.astimezone(REVIEW_TIMEZONE)
+    if local.time() < time(12):
+        local = datetime.combine(local.date(), time(12), REVIEW_TIMEZONE)
+    elif local.time() > time(22):
+        local = datetime.combine(local.date() + timedelta(days=1), time(12), REVIEW_TIMEZONE)
+    return local.astimezone(timezone.utc)
+
 
 scheduler = Scheduler(
     parameters = (
@@ -26,20 +41,13 @@ scheduler = Scheduler(
             0.1542,
     ),
     desired_retention = 0.9,
-    learning_steps = (timedelta(minutes=1), timedelta(minutes=10)),
-    relearning_steps = (timedelta(minutes=10),),
+    learning_steps = (),
+    relearning_steps = (),
     maximum_interval = 30,
     enable_fuzzing = False
 )
 
-
 def schedule_next_review(card: Card, rating: Rating):
-    return scheduler.review_card(card, rating)
-
-card = Card()
-
-card, review_log = schedule_next_review(card, Rating.Good)
-
-print("Next review:", card.due)
-
-
+    updated_card, review_log = scheduler.review_card(card, rating)
+    updated_card.due = fit_review_window(updated_card.due)
+    return updated_card, review_log

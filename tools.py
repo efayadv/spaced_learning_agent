@@ -1,9 +1,7 @@
 from datetime import datetime, timezone, timedelta
-from scheduler import schedule_next_review
+from scheduler import schedule_next_review, fit_review_window
 from database import get_connection
 from fsrs import Card, Rating
-
-
 
 def add_review_item(topic_name: str, learning_objective: str):
     topic_name = topic_name.strip()
@@ -13,6 +11,7 @@ def add_review_item(topic_name: str, learning_objective: str):
         raise ValueError("Topic and learning objective cannot be empty.")
 
     card = Card()
+    card.due = fit_review_window(card.due)
     connection = get_connection()
     try:
         with connection:
@@ -385,7 +384,7 @@ def save_session_review_items(session_id: int, objectives: list[str]):
                     "items": [dict(row) for row in existing],
                 }
 
-            first_due = datetime.now(timezone.utc) + timedelta(days=1)
+            first_due = fit_review_window(datetime.now(timezone.utc) + timedelta(days=1))
             saved = []
 
             for objective in objectives:
@@ -431,10 +430,48 @@ def save_session_review_items(session_id: int, objectives: list[str]):
                     "next_due_at": card.due.isoformat(),
                 })
 
-                return {"status": "saved", "items": saved}
+            return {"status": "saved", "items": saved}
+        
     finally:
         connection.close()
-    
+
+
+def get_item_history(item_id: int):
+    # Retrieve previous questions, answers, and feedback
+    connection = get_connection()
+    try:
+        item = connection.execute(
+            """
+            SELECT id 
+            FROM review_items
+            WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+
+        if item is None:
+            raise ValueError("No review item found with this id")
+
+        #from attempts
+        attempts = connection.execute(
+            """
+            SELECT
+                question,
+                answer,
+                feedback,
+                reviewed_at
+            FROM attempts
+            WHERE review_item_id = ?
+            ORDER BY reviewed_at DESC, id DESC
+            """,
+            (item_id,),
+        ).fetchall()
+
+        return [dict(attempt) for attempt in attempts]    
+
+        #we are to retrieve previous question, answers and feedback from attempts
+    finally:
+        connection.close()
 
 
 
@@ -444,3 +481,31 @@ def save_session_review_items(session_id: int, objectives: list[str]):
 
 
 
+
+
+
+
+def align_existing_review_times():
+    """Keep persisted FSRS cards and due columns within the review window."""
+    connection = get_connection()
+    changed = 0
+    try:
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for row in connection.execute(
+                "SELECT id, fsrs_card_json, next_due_at FROM review_items"
+            ).fetchall():
+                due = datetime.fromisoformat(row["next_due_at"])
+                adjusted = fit_review_window(due)
+                card = Card.from_json(row["fsrs_card_json"])
+                if adjusted == due and card.due == adjusted:
+                    continue
+                card.due = adjusted
+                connection.execute(
+                    "UPDATE review_items SET fsrs_card_json = ?, next_due_at = ? WHERE id = ?",
+                    (card.to_json(), adjusted.isoformat(), row["id"]),
+                )
+                changed += 1
+        return changed
+    finally:
+        connection.close()
