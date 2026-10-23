@@ -2,6 +2,7 @@ from database import get_connection
 import re
 from datetime import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import subprocess
 
 def get_reminder_settings():
     connection = get_connection()
@@ -100,8 +101,22 @@ def update_reminder_settings(
         connection.close()
 
 
+def send_notification(title: str, message: str):
+    script = """
+    on run argv
+        display notification (item 2 of argv) with title (item 1 of argv)
+    end run
+    """
 
-def send_notification(title, message): ...
+    subprocess.run(
+        ["/usr/bin/osascript", "-e", script, title, message],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
 def check_reminders(now=None):
     pass
 
