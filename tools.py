@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from scheduler import schedule_next_review, fit_review_window
+from scheduler import schedule_next_review
 from database import get_connection
 from fsrs import Card, Rating
 
@@ -11,7 +11,6 @@ def add_review_item(topic_name: str, learning_objective: str):
         raise ValueError("Topic and learning objective cannot be empty.")
 
     card = Card()
-    card.due = fit_review_window(card.due)
     connection = get_connection()
     try:
         with connection:
@@ -384,7 +383,7 @@ def save_session_review_items(session_id: int, objectives: list[str]):
                     "items": [dict(row) for row in existing],
                 }
 
-            first_due = fit_review_window(datetime.now(timezone.utc) + timedelta(days=1))
+            first_due = datetime.now(timezone.utc) + timedelta(days=1)
             saved = []
 
             for objective in objectives:
@@ -431,7 +430,6 @@ def save_session_review_items(session_id: int, objectives: list[str]):
                 })
 
             return {"status": "saved", "items": saved}
-        
     finally:
         connection.close()
 
@@ -483,29 +481,3 @@ def get_item_history(item_id: int):
 
 
 
-
-
-def align_existing_review_times():
-    """Keep persisted FSRS cards and due columns within the review window."""
-    connection = get_connection()
-    changed = 0
-    try:
-        with connection:
-            connection.execute("BEGIN IMMEDIATE")
-            for row in connection.execute(
-                "SELECT id, fsrs_card_json, next_due_at FROM review_items"
-            ).fetchall():
-                due = datetime.fromisoformat(row["next_due_at"])
-                adjusted = fit_review_window(due)
-                card = Card.from_json(row["fsrs_card_json"])
-                if adjusted == due and card.due == adjusted:
-                    continue
-                card.due = adjusted
-                connection.execute(
-                    "UPDATE review_items SET fsrs_card_json = ?, next_due_at = ? WHERE id = ?",
-                    (card.to_json(), adjusted.isoformat(), row["id"]),
-                )
-                changed += 1
-        return changed
-    finally:
-        connection.close()

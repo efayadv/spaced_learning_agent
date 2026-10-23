@@ -65,6 +65,24 @@ def initialize_database():
                     FOREIGN KEY (session_id) REFERENCES study_sessions(id),
                     FOREIGN KEY (review_item_id) REFERENCES review_items(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS reminder_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    daily_time TEXT NOT NULL DEFAULT '12:00',
+                    followup_enabled INTEGER NOT NULL DEFAULT 1,
+                    followup_time TEXT NOT NULL DEFAULT '19:00',
+                    timezone TEXT NOT NULL DEFAULT 'America/Chicago'
+                );
+
+                INSERT OR IGNORE INTO reminder_settings (id) VALUES (1);
+
+                CREATE TABLE IF NOT EXISTS reminder_deliveries (
+                    local_date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    sent_at TEXT NOT NULL,
+                    PRIMARY KEY (local_date, slot)
+                );
             """)
     finally:
         connection.close()
