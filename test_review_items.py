@@ -11,7 +11,6 @@ from tools import (
     start_study_session,
 )
 
-
 class SessionReviewItemsTests(unittest.TestCase):
     def test_saves_entire_batch_and_reopening_does_not_duplicate_it(self):
         with tempfile.TemporaryDirectory() as directory:

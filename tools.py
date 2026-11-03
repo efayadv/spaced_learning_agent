@@ -472,6 +472,67 @@ def get_item_history(item_id: int):
         connection.close()
 
 
+def get_upcoming_reviews(days: int):
+    if type(days) is not int or not 1 <= days <= 90:
+        raise ValueError("Choose a range between 1 and 90 days.")
+
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=days)
+
+    connection = get_connection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT r.id, t.name AS topic,
+                   r.learning_objective, r.next_due_at
+            FROM review_items AS r
+            JOIN topics AS t ON t.id = r.topic_id
+            WHERE r.next_due_at > ? AND r.next_due_at <= ?
+            ORDER BY r.next_due_at, r.id
+            """,
+            (now.isoformat(), end.isoformat()),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    finally:
+        connection.close()
+
+'''
+This function is able to get notes and topics
+'''
+def find_study_sessions(topic: str):
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("Provide a topic or keyword.")
+
+    keyword = topic.strip()
+    connection = get_connection()
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT s.id AS session_id, t.name AS topic,
+                   s.ended_at, s.notes
+            FROM study_sessions AS s
+            JOIN topics AS t ON t.id = s.topic_id
+            WHERE s.ended_at IS NOT NULL
+              AND (
+                  instr(lower(t.name), lower(?)) > 0
+                  OR instr(lower(s.notes), lower(?)) > 0
+              )
+            ORDER BY s.ended_at DESC, s.id DESC
+            LIMIT 5
+            """,
+            (keyword, keyword),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    finally:
+        connection.close()
+
+
+
 
 
 
