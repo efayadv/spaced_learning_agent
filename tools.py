@@ -158,278 +158,62 @@ def get_due_items():
     finally:
         connection.close()
 
-def start_study_session(topic_name: str):
-    topic_name = topic_name.strip()
-
-    if not topic_name:
-        raise ValueError("Topic cannot be empty")
-
-    connection = get_connection()
-
-    try:
-        with connection:
-            active = connection.execute(
-                """
-                SELECT id
-                FROM study_sessions
-                WHERE ended_at IS NULL
-                """
-            ).fetchone()
-
-            if active is not None:
-                raise ValueError(
-                    f"Session #{active['id']} is already active. "
-                    "Finish it before starting another."
-                )
-
-            connection.execute(
-                "INSERT OR IGNORE INTO topics (name) VALUES (?)", 
-                (topic_name,),
-            )
-
-            topic = connection.execute(
-                "SELECT id FROM topics WHERE name = ?",
-                (topic_name,),
-            ).fetchone()
-
-            started_at = datetime.now(timezone.utc).isoformat()
-
-            cursor = connection.execute(
-                """
-                INSERT INTO study_sessions (topic_id, started_at)
-                VALUES (?, ?)
-                """,
-                (topic["id"], started_at),
-            )
-
-            return {
-                "session_id": cursor.lastrowid,
-                "topic": topic_name,
-                "started_at": started_at,
-            }
-    finally:
-        connection.close()
-
-
-
-def get_active_study_session():
-    connection = get_connection()
-
-    try:
-        row = connection.execute(
-            """
-            SELECT
-                study_sessions.id,
-                topics.name AS topic,
-                study_sessions.started_at
-            FROM study_sessions
-            JOIN topics ON topics.id = study_sessions.topic_id
-            WHERE study_sessions.ended_at IS NULL
-            """
-        ).fetchone()
-
-        return dict(row) if row else None
-    finally:
-        connection.close()
-
-def finish_study_session(notes: str):
-    notes = notes.strip()
-
-    if not notes:
-        raise ValueError(
-            "Describe what you covered so the coach can assess it later."
-        )
-
-    connection = get_connection()
-
-    try: 
-        with connection:
-            session = connection.execute(
-                """
-                SELECT id, started_at
-                FROM study_sessions
-                WHERE ended_at is NULL
-                """
-            ).fetchone()
-
-            if session is None:
-                raise ValueError("There is no active study session.")
-
-            ended_at = datetime.now(timezone.utc)
-            started_at = datetime.fromisoformat(session["started_at"])
-
-            connection.execute(
-                """
-                UPDATE study_sessions
-                SET ended_at = ?, notes = ?
-                WHERE id = ?
-                """,
-                (ended_at.isoformat(), notes, session["id"]),
-            )
-            return {
-                "session_id": session["id"],
-                "elapsed_minutes": (
-                    ended_at - started_at
-                ).total_seconds() / 60,
-                "assessment_status": "pending",
-            }
-
-    finally:
-        connection.close()
-
-def get_study_session(session_id: id):
-    connection = get_connection()
-    try:
-        row = connection.execute(
-            """
-            SELECT
-                study_sessions.id,
-                topics.name AS topic,
-                study_sessions.started_at,
-                study_sessions.ended_at,
-                study_sessions.notes
-            FROM study_sessions
-            JOIN topics ON topics.id = study_sessions.topic_id
-            WHERE study_sessions.id = ?
-            """,
-            (session_id,),
-        ).fetchone()
-
-        if row is None:
-            raise ValueError("Study session not found")
-
-        if row["ended_at"] is None:
-            raise ValueError("Finish the study session first")
-
-        return dict(row)
-    
-    finally:
-        connection.close()
-
-def get_session_review_items(session_id: int):
-    connection = get_connection()
-
-    try:
-        rows = connection.execute(
-            """
-            SELECT
-                r.id,
-                r.learning_objective,
-                r.next_due_at
-            FROM review_items AS r
-            JOIN session_review_items AS link
-                ON link.review_item_id = r.id
-            WHERE link.session_id = ?
-            ORDER BY r.id
-            """,
-            (session_id,),
-        ).fetchall()
-
-        return [dict(row) for row in rows]
-
-    finally:
-        connection.close()
-
-def save_session_review_items(session_id: int, objectives: list[str]):
+def save_notes(topic: str, notes: str, objectives: list[str]):
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("Topic cannot be empty.")
+    if not isinstance(notes, str) or not notes.strip():
+        raise ValueError("Notes cannot be empty.")
     if not isinstance(objectives, list) or not 1 <= len(objectives) <= 5:
-        raise ValueError("Provide between 1 and 5 objectives")
-
-    if any(
-        not isinstance(objective, str)
-        or not objective.strip()
-        or len(objective) > 500
-        for objective in objectives
-    ):
-        raise ValueError("Objectives must be non empty and under 500 characters.")
-
-    objectives = [objective.strip() for objective in objectives]
-
-    if len({objective.casefold() for objective in objectives}) != len(objectives):
-        raise ValueError("Remove duplicate objectives")
+        raise ValueError("Provide between 1 and 5 objectives.")
+    if any(not isinstance(value, str) or not value.strip() or len(value) > 500
+           for value in objectives):
+        raise ValueError("Objectives must be nonempty and at most 500 characters.")
+    objectives = [value.strip() for value in objectives]
+    if len({value.casefold() for value in objectives}) != len(objectives):
+        raise ValueError("Remove duplicate objectives.")
 
     connection = get_connection()
-
     try:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
-
-            session = connection.execute(
-                """
-                SELECT topic_id, ended_at
-                FROM study_sessions
-                WHERE id = ?
-                """,
-                (session_id,),
-            ).fetchone()
-
-            if session is None or session["ended_at"] is None:
-                raise ValueError("A completed study session is required.")
-
+            connection.execute("INSERT OR IGNORE INTO topics (name) VALUES (?)", (topic.strip(),))
+            topic_id = connection.execute(
+                "SELECT id FROM topics WHERE name = ?", (topic.strip(),)
+            ).fetchone()["id"]
             existing = connection.execute(
-                """
-                SELECT r.id, r.learning_objective, r.next_due_at
-                FROM review_items AS r
-                JOIN session_review_items AS link
-                    ON link.review_item_id = r.id
-                WHERE link.session_id = ?
-                ORDER BY r.id
-                """,
-                (session_id,),
-            ).fetchall()
-
+                "SELECT id FROM notes WHERE topic_id = ? AND content = ?",
+                (topic_id, notes.strip()),
+            ).fetchone()
             if existing:
-                return {
-                    "status": "already_saved",
-                    "items": [dict(row) for row in existing],
-                }
-
-            first_due = datetime.now(timezone.utc) + timedelta(days=1)
-            saved = []
-
-            for objective in objectives:
-                card = Card()
-                card.due = first_due
-
-                cursor = connection.execute(
-                    """
-                    INSERT INTO review_items (
-                        topic_id,
-                        learning_objective,
-                        fsrs_card_json,
-                        next_due_at
+                note_id = existing["id"]
+                status = "already_saved"
+            else:
+                note_id = connection.execute(
+                    "INSERT INTO notes (topic_id, content, created_at) VALUES (?, ?, ?)",
+                    (topic_id, notes.strip(), datetime.now(timezone.utc).isoformat()),
+                ).lastrowid
+                first_due = datetime.now(timezone.utc) + timedelta(days=1)
+                for objective in objectives:
+                    card = Card()
+                    card.due = first_due
+                    item_id = connection.execute(
+                        """INSERT INTO review_items
+                           (topic_id, learning_objective, fsrs_card_json, next_due_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (topic_id, objective, card.to_json(), card.due.isoformat()),
+                    ).lastrowid
+                    connection.execute(
+                        "INSERT INTO note_review_items (note_id, review_item_id) VALUES (?, ?)",
+                        (note_id, item_id),
                     )
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        session["topic_id"],
-                        objective,
-                        card.to_json(),
-                        card.due.isoformat(),
-                    ),
-                )
-
-                item_id = cursor.lastrowid
-
-                connection.execute(
-                    """
-                    INSERT INTO session_review_items (
-                        session_id,
-                        review_item_id
-                    ) VALUES (?, ?)
-                    """,
-                    (
-                        session_id,
-                        item_id
-                    ),
-                )
-
-                saved.append({
-                    "id": item_id,
-                    "learning_objective": objective,
-                    "next_due_at": card.due.isoformat(),
-                })
-
-            return {"status": "saved", "items": saved}
+                status = "saved"
+            rows = connection.execute(
+                """SELECT r.id, r.learning_objective, r.next_due_at
+                   FROM review_items AS r JOIN note_review_items AS link
+                   ON link.review_item_id = r.id WHERE link.note_id = ? ORDER BY r.id""",
+                (note_id,),
+            ).fetchall()
+            return {"status": status, "note_id": note_id, "items": [dict(row) for row in rows]}
     finally:
         connection.close()
 
@@ -501,7 +285,7 @@ def get_upcoming_reviews(days: int):
 '''
 This function is able to get notes and topics
 '''
-def find_study_sessions(topic: str):
+def find_notes(topic: str):
     if not isinstance(topic, str) or not topic.strip():
         raise ValueError("Provide a topic or keyword.")
 
@@ -511,16 +295,15 @@ def find_study_sessions(topic: str):
     try:
         rows = connection.execute(
             """
-            SELECT s.id AS session_id, t.name AS topic,
-                   s.ended_at, s.notes
-            FROM study_sessions AS s
+            SELECT s.id AS note_id, t.name AS topic,
+                   s.created_at, s.content AS notes
+            FROM notes AS s
             JOIN topics AS t ON t.id = s.topic_id
-            WHERE s.ended_at IS NOT NULL
-              AND (
+            WHERE (
                   instr(lower(t.name), lower(?)) > 0
-                  OR instr(lower(s.notes), lower(?)) > 0
+                  OR instr(lower(s.content), lower(?)) > 0
               )
-            ORDER BY s.ended_at DESC, s.id DESC
+            ORDER BY s.created_at DESC, s.id DESC
             LIMIT 5
             """,
             (keyword, keyword),

@@ -1,16 +1,13 @@
+import sys
 from database import initialize_database
 from datetime import datetime
 from scheduler import REVIEW_TIMEZONE
 from tools import (
     add_review_item,
-    align_existing_review_times,
     get_due_items,
     complete_review,
-    start_study_session,
-    get_active_study_session,
-    finish_study_session,
 )
-from agent import run_coach, run_due_reviews
+from agent import run_agent, run_due_reviews
 
 def show_due_items(items):
     for item in items:
@@ -67,27 +64,16 @@ def review_item():
 
 def main():
     initialize_database()
-    align_existing_review_times()
 
     while True:
         print("--------------------------------")
         print("\nInterview Coach")
 
-        active = get_active_study_session()
-
-        if active:
-            print(
-                f"Active session: #{active['id']} — {active['topic']}"
-            )
-
         print("1. Add a learning item")
         print("2. Show due items")
         print("3. Review due items with AI coach")
-        print("4. Start studying")
-        print("5. Finish studying")
-        print("6. Exit")
-        print("7. Discuss a completed session with the AI coach")
-
+        print("4. Chat with the AI coach / save notes")
+        print("5. Exit")
 
         choice = input("Choose an option: ").strip()
 
@@ -113,63 +99,21 @@ def main():
                 run_due_reviews()
 
             elif choice == "4":
-                topic = input("What are you studying? ")
-                session = start_study_session(topic)
-
-                print(
-                    f"Started session #{session['session_id']} "
-                    f"on {session['topic']}."
-                )
-                print(
-                    "Study your material, then choose "
-                    "'Finish studying' when you're done."
-                )
+                run_agent()
 
             elif choice == "5":
-                if get_active_study_session() is None:
-                    print("There is no active study session.")
-                    continue
-
-                print(
-                    "Describe what you covered. Include specific "
-                    "concepts, examples, or anything confusing."
-                )
-                print("Enter a blank line to finish your notes.")
-
-                lines = []
-
-                while True:
-                    line = input()
-                    if not line.strip():
-                        break
-                    lines.append(line)
-
-                result = finish_study_session("\n".join(lines))
-
-                print(
-                    f"Saved session #{result['session_id']}. "
-                    f"Elapsed time: {result['elapsed_minutes']:.1f} minutes."
-                )
-                print("Notes saved. Assessment is pending.")
-
-            elif choice == "6":
-                if active:
-                    print(
-                        "Your study session remains active. "
-                        "Reopen the app to finish it."
-                    )
                 break
 
-            elif choice == "7":
-                session_id = int(input("Completed study session ID: "))
-                run_coach(session_id)
-
             else:
-                print("Please choose an option from 1 to 7.")
+                print("Please choose an option from 1 to 5.")
 
         except ValueError as error:
             print(error)
 
 
 if __name__ == "__main__":
-    main()
+    if "--menu" in sys.argv:
+        main()
+    else:
+        initialize_database()
+        run_agent()

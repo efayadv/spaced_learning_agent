@@ -44,26 +44,19 @@ def initialize_database():
                 CREATE INDEX IF NOT EXISTS idx_review_items_due
                 ON review_items(next_due_at);
 
-                CREATE TABLE IF NOT EXISTS study_sessions (
+                CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY,
-                    topic_id INTEGER NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    notes TEXT,
-                    assessment_status TEXT NOT NULL DEFAULT 'pending',
-                    FOREIGN KEY (topic_id) REFERENCES topics(id)
+                    topic_id INTEGER NOT NULL REFERENCES topics(id),
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    legacy_session_id INTEGER UNIQUE,
+                    UNIQUE (topic_id, content)
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_study_session
-                ON study_sessions ((1))
-                WHERE ended_at IS NULL;
-
-                CREATE TABLE IF NOT EXISTS session_review_items (
-                    session_id INTEGER NOT NULL,
-                    review_item_id INTEGER NOT NULL,
-                    PRIMARY KEY (session_id, review_item_id),
-                    FOREIGN KEY (session_id) REFERENCES study_sessions(id),
-                    FOREIGN KEY (review_item_id) REFERENCES review_items(id)
+                CREATE TABLE IF NOT EXISTS note_review_items (
+                    note_id INTEGER NOT NULL REFERENCES notes(id),
+                    review_item_id INTEGER NOT NULL REFERENCES review_items(id),
+                    PRIMARY KEY (note_id, review_item_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS reminder_settings (
@@ -84,5 +77,25 @@ def initialize_database():
                     PRIMARY KEY (local_date, slot)
                 );
             """)
+            # Copy old notes and their review links without deleting historical data.
+            legacy = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'study_sessions'"
+            ).fetchone()
+            if legacy:
+                connection.execute("""
+                    INSERT OR IGNORE INTO notes (topic_id, content, created_at, legacy_session_id)
+                    SELECT topic_id, TRIM(notes), COALESCE(ended_at, started_at), id
+                    FROM study_sessions WHERE notes IS NOT NULL AND TRIM(notes) != ''
+                """)
+                links = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_review_items'"
+                ).fetchone()
+                if links:
+                    connection.execute("""
+                        INSERT OR IGNORE INTO note_review_items (note_id, review_item_id)
+                        SELECT n.id, link.review_item_id FROM session_review_items AS link
+                        JOIN study_sessions AS s ON s.id = link.session_id
+                        JOIN notes AS n ON n.topic_id = s.topic_id AND n.content = TRIM(s.notes)
+                    """)
     finally:
         connection.close()
